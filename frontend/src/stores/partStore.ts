@@ -12,6 +12,7 @@ export const usePartStore = defineStore('part', {
   state: (): PartState => ({ items: [], loaded: false }),
   getters: {
     byClock: (state) => (clockId: string) => state.items.filter((it) => it.clockId === clockId),
+    byId: (state) => (id: string) => state.items.find((it) => it.id === id),
     pendingRepair: (state) => state.items.filter((it) => it.decision !== '保留' && it.wearState !== '完好'),
   },
   actions: {
@@ -29,6 +30,10 @@ export const usePartStore = defineStore('part', {
       const plain = toPlain(patch);
       await db.parts.update(id, plain);
       this.items = this.items.map((it) => (it.id === id ? { ...it, ...plain } : it));
+    },
+    /** 录入实测尺寸；传 null 表示清除实测、回到待测 */
+    async recordMeasurement(id: string, measured: number | null) {
+      await this.update(id, { measuredDimension: measured });
     },
     async remove(id: string) {
       await db.parts.delete(id);

@@ -3,6 +3,8 @@ import { db, toPlain } from '../utils/db';
 import { newId } from '../utils/id';
 import type { RepairStep, RepairStepDraft } from '../types/step';
 import type { TimekeepingTest, TimekeepingTestDraft } from '../types/test';
+import { assemblyBlockers, formatBlockers } from '../utils/assemblyGate';
+import { usePartStore } from './partStore';
 
 interface StepState {
   items: RepairStep[];
@@ -34,6 +36,14 @@ export const useStepStore = defineStore('step', {
       return record;
     },
     async finish(id: string) {
+      const step = this.items.find((it) => it.id === id);
+      if (step) {
+        // 装配步骤关联的修配/换新件未实测或超差时，进度停在完成前
+        const blockers = assemblyBlockers(step, usePartStore().items);
+        if (blockers.length > 0) {
+          throw new Error(`装配受阻：${formatBlockers(blockers)}`);
+        }
+      }
       const patch: Partial<RepairStep> = { state: 'done', finishedAt: Date.now() };
       await db.steps.update(id, patch);
       this.items = this.items.map((it) => (it.id === id ? { ...it, ...patch } : it));

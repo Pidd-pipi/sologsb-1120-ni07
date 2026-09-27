@@ -7,7 +7,8 @@ import { usePartStore } from '../stores/partStore';
 import { useStepStore } from '../stores/stepStore';
 import { useRepairProgress } from '../hooks/useRepairProgress';
 import StepSequence from '../components/common/StepSequence.vue';
-import { STEP_FIELD_MAP, STEP_TYPES, type RepairStepDraft, type StepType } from '../types/step';
+import { STEP_FIELD_MAP, STEP_TYPES, type RepairStep, type RepairStepDraft, type StepType } from '../types/step';
+import { assemblyGate, formatBlockers, type GateResult } from '../utils/assemblyGate';
 
 const route = useRoute();
 const router = useRouter();
@@ -19,6 +20,11 @@ const clockId = ref(String(route.query.clockId ?? ''));
 const { steps, total, percent, current, gaps } = useRepairProgress(clockId);
 const parts = computed(() => partStore.byClock(clockId.value));
 const nextSeq = computed(() => (steps.value.length === 0 ? 1 : Math.max(...steps.value.map((s) => s.seq)) + 1));
+
+/** 装配卡控：供工序表展示与完成按钮禁用 */
+function gate(step: RepairStep): GateResult {
+  return assemblyGate(step, partStore.items);
+}
 
 const form = reactive<RepairStepDraft>({
   clockId: '',
@@ -38,6 +44,11 @@ const form = reactive<RepairStepDraft>({
 
 const error = ref('');
 const fields = computed(() => STEP_FIELD_MAP[form.stepType as StepType]);
+
+/** 表单草稿（装配类）当前所选零件中的未实测/超差项，提前提示 */
+const draftBlockers = computed(() =>
+  assemblyGate({ stepType: form.stepType, partIds: form.partIds }, partStore.items).blockers,
+);
 
 watch(
   clockId,
@@ -83,8 +94,12 @@ async function submit() {
 }
 
 async function finish(id: string) {
-  await stepStore.finish(id);
-  ElMessage.success('步骤已完成');
+  try {
+    await stepStore.finish(id);
+    ElMessage.success('步骤已完成');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '无法完成该步骤');
+  }
 }
 async function rollback(id: string) {
   await stepStore.rollback(id);
@@ -166,6 +181,14 @@ onMounted(async () => {
               />
             </el-select>
           </el-form-item>
+          <el-alert
+            v-if="draftBlockers.length"
+            type="warning"
+            :closable="false"
+            show-icon
+            style="margin: 0 0 12px 120px"
+            :title="`所选装配零件未通过实测卡控，步骤将无法完成：${formatBlockers(draftBlockers)}`"
+          />
           <el-form-item label="异常说明">
             <el-input v-model="form.troubleNote" type="textarea" :rows="3" />
           </el-form-item>
@@ -188,7 +211,7 @@ onMounted(async () => {
             <span v-else class="muted">全部完成</span>
           </div>
         </template>
-        <StepSequence :items="steps" @finish="finish" @rollback="rollback" />
+        <StepSequence :items="steps" :gate="gate" @finish="finish" @rollback="rollback" />
       </el-card>
     </div>
   </div>

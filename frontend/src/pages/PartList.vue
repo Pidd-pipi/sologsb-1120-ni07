@@ -5,12 +5,20 @@ import { useClockStore } from '../stores/clockStore';
 import { usePartStore } from '../stores/partStore';
 import StateBadge from '../components/common/StateBadge.vue';
 import {
+  MEASURE_STATES,
+  MEASURE_STATE_LABELS,
   PART_DECISIONS,
   PART_NAMES,
   WEAR_STATES,
+  deviation,
+  fmtMm,
+  fmtSignedMm,
+  measureState,
+  overTolerance,
+  type MeasureState,
+  type MovementPart,
   type MovementPartDraft,
   type PartDecision,
-  type PartName,
   type WearState,
 } from '../types/part';
 
@@ -21,9 +29,10 @@ const wearFilter = ref<WearState | 'all'>('all');
 const clockFilter = ref('all');
 const onlyPending = ref(false);
 const dialogVisible = ref(false);
+const editingId = ref<string | null>(null);
 const error = ref('');
 
-const form = reactive<MovementPartDraft>({
+const blankForm = (): MovementPartDraft => ({
   clockId: '',
   name: '发条',
   qtyNeeded: 1,
@@ -31,8 +40,15 @@ const form = reactive<MovementPartDraft>({
   wearState: '磨损',
   decision: '修配',
   sourceLot: '',
-  dimension: 1,
+  stdDimension: 1,
+  tolerance: 0.05,
+  measuredDimension: null,
 });
+
+const form = reactive<MovementPartDraft>(blankForm());
+
+/** 实测录入草稿：未触碰时回退到已保存的实测值 */
+const measureDraft = reactive<Record<string, number | null>>({});
 
 const rows = computed(() =>
   partStore.items.filter((p) => {
@@ -43,9 +59,20 @@ const rows = computed(() =>
   }),
 );
 
+/** 按实测判定分组：待测（含老数据待补录）/ 合格 / 超差 */
 const groups = computed(() =>
-  WEAR_STATES.map((state) => ({ state, rows: rows.value.filter((p) => p.wearState === state) })),
+  MEASURE_STATES.map((state) => ({
+    state,
+    label: MEASURE_STATE_LABELS[state],
+    rows: rows.value.filter((p) => measureState(p) === state),
+  })),
 );
+
+const measureCounts = computed(() => {
+  const counts: Record<MeasureState, number> = { pending: 0, ok: 0, out: 0 };
+  for (const p of partStore.items) counts[measureState(p)] += 1;
+  return counts;
+});
 
 const pendingCount = computed(
   () => partStore.items.filter((p) => p.decision !== '保留' && p.wearState !== '完好').length,
@@ -55,10 +82,35 @@ function clockNo(clockId: string): string {
   return clockStore.byId(clockId)?.clockNo ?? '未知钟表';
 }
 
+function draftValue(row: MovementPart): number | null {
+  return row.id in measureDraft ? measureDraft[row.id] : row.measuredDimension;
+}
+
 function openDialog() {
+  editingId.value = null;
+  Object.assign(form, blankForm());
+  form.clockId = clockFilter.value !== 'all' ? clockFilter.value : clockStore.items[0]?.id ?? '';
   dialogVisible.value = true;
   error.value = '';
-  form.clockId = clockFilter.value !== 'all' ? clockFilter.value : clockStore.items[0]?.id ?? '';
+}
+
+/** 老零件补录 / 规格修订：保留原值带入表单 */
+function openEdit(row: MovementPart) {
+  editingId.value = row.id;
+  Object.assign(form, {
+    clockId: row.clockId,
+    name: row.name,
+    qtyNeeded: row.qtyNeeded,
+    position: row.position,
+    wearState: row.wearState,
+    decision: row.decision,
+    sourceLot: row.sourceLot,
+    stdDimension: row.stdDimension,
+    tolerance: row.tolerance,
+    measuredDimension: row.measuredDimension,
+  });
+  dialogVisible.value = true;
+  error.value = '';
 }
 
 async function submit() {
@@ -70,15 +122,40 @@ async function submit() {
     error.value = '装配位置必填';
     return;
   }
-  await partStore.add({
-    ...form,
-    position: form.position.trim(),
-    sourceLot: form.decision === '换新' ? form.sourceLot.trim() : form.sourceLot.trim(),
-  });
+  if (form.tolerance < 0) {
+    error.value = '允许误差不能为负';
+    return;
+  }
+  const payload = { ...form, position: form.position.trim(), sourceLot: form.sourceLot.trim() };
+  if (editingId.value) {
+    await partStore.update(editingId.value, payload);
+    ElMessage.success('零件规格已更新');
+  } else {
+    await partStore.add(payload);
+    ElMessage.success('已登记零件');
+  }
   dialogVisible.value = false;
-  ElMessage.success('已登记零件');
-  form.position = '';
-  form.sourceLot = '';
+}
+
+/** 录入实测尺寸并自动判定合格/超差；清空则回到待测 */
+async function saveMeasurement(row: MovementPart) {
+  const value = draftValue(row);
+  await partStore.recordMeasurement(row.id, value);
+  delete measureDraft[row.id];
+  if (value === null || value === undefined) {
+    ElMessage.info(`「${row.name}」已清除实测值，回到待测`);
+    return;
+  }
+  const updated = partStore.byId(row.id);
+  if (!updated) return;
+  const dev = deviation(updated);
+  if (measureState(updated) === 'ok') {
+    ElMessage.success(`「${row.name}」判定合格，偏差 ${fmtSignedMm(dev)}mm`);
+  } else {
+    ElMessage.error(
+      `「${row.name}」超差：偏差 ${fmtSignedMm(dev)}mm，超出允许误差 ${fmtMm(overTolerance(updated))}mm`,
+    );
+  }
 }
 
 async function setDecision(id: string, decision: PartDecision) {
@@ -97,7 +174,10 @@ onMounted(async () => {
     <div class="header">
       <h2>零件与配换清单</h2>
       <el-tag>共 {{ partStore.items.length }} 项</el-tag>
-      <el-tag type="warning">待修配 {{ pendingCount }} 项</el-tag>
+      <el-tag type="warning">待测 {{ measureCounts.pending }} 项</el-tag>
+      <el-tag type="success">合格 {{ measureCounts.ok }} 项</el-tag>
+      <el-tag type="danger">超差 {{ measureCounts.out }} 项</el-tag>
+      <el-tag type="warning" effect="plain">待修配 {{ pendingCount }} 项</el-tag>
       <div class="spacer" />
       <el-button type="primary" @click="openDialog">登记零件</el-button>
     </div>
@@ -125,18 +205,22 @@ onMounted(async () => {
     <el-card v-for="group in groups" :key="group.state" shadow="never">
       <template #header>
         <div class="card-head">
-          <strong>{{ group.state }}</strong>
-          <el-tag size="small" type="info">{{ group.rows.length }} 项</el-tag>
+          <strong>{{ group.label }}<span v-if="group.state === 'pending'" class="muted">（含待补录）</span></strong>
+          <el-tag
+            size="small"
+            :type="group.state === 'out' ? 'danger' : group.state === 'ok' ? 'success' : 'warning'"
+            >{{ group.rows.length }} 项</el-tag
+          >
         </div>
       </template>
       <el-table :data="group.rows" size="small" border>
-        <el-table-column label="钟表" width="150">
+        <el-table-column label="钟表" width="140">
           <template #default="{ row }">{{ clockNo(row.clockId) }}</template>
         </el-table-column>
-        <el-table-column prop="name" label="零件" width="110" />
-        <el-table-column prop="qtyNeeded" label="数量" width="80" />
-        <el-table-column prop="position" label="装配位置" min-width="160" />
-        <el-table-column label="状态" width="100">
+        <el-table-column prop="name" label="零件" width="100" />
+        <el-table-column prop="qtyNeeded" label="数量" width="70" />
+        <el-table-column prop="position" label="装配位置" min-width="130" />
+        <el-table-column label="状态" width="90">
           <template #default="{ row }">
             <StateBadge :label="row.wearState" :tone="row.wearState === '完好' ? 'success' : 'danger'" />
           </template>
@@ -148,19 +232,66 @@ onMounted(async () => {
             </el-radio-group>
           </template>
         </el-table-column>
-        <el-table-column prop="sourceLot" label="配换来源批号" width="150" />
-        <el-table-column prop="dimension" label="关键尺寸 mm" width="120" />
-        <el-table-column label="待配" width="90">
+        <el-table-column prop="sourceLot" label="来源批号" width="110" />
+        <el-table-column label="标准尺寸 mm" width="100">
+          <template #default="{ row }">{{ fmtMm(row.stdDimension) }}</template>
+        </el-table-column>
+        <el-table-column label="允许误差 mm" width="100">
+          <template #default="{ row }">±{{ fmtMm(row.tolerance) }}</template>
+        </el-table-column>
+        <el-table-column label="实测录入 mm" width="210">
+          <template #default="{ row }">
+            <div class="measure-cell">
+              <el-input-number
+                :model-value="draftValue(row)"
+                size="small"
+                :min="0"
+                :max="200"
+                :step="0.01"
+                :precision="3"
+                placeholder="实测值"
+                style="width: 120px"
+                @update:model-value="(v: number | undefined) => (measureDraft[row.id] = v ?? null)"
+              />
+              <el-button size="small" type="primary" plain @click="saveMeasurement(row)">
+                {{ row.measuredDimension === null ? '录入' : '重录' }}
+              </el-button>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="判定 / 偏差" min-width="170">
+          <template #default="{ row }">
+            <template v-if="measureState(row) === 'pending'">
+              <el-tag type="warning" size="small">待测</el-tag>
+            </template>
+            <template v-else-if="measureState(row) === 'ok'">
+              <el-tag type="success" size="small">合格</el-tag>
+              <span class="dev">偏差 {{ fmtSignedMm(deviation(row)) }}mm</span>
+            </template>
+            <template v-else>
+              <el-tag type="danger" size="small">超差</el-tag>
+              <span class="dev out">
+                偏差 {{ fmtSignedMm(deviation(row)) }}mm，超 {{ fmtMm(overTolerance(row)) }}mm
+              </span>
+            </template>
+          </template>
+        </el-table-column>
+        <el-table-column label="待配" width="80">
           <template #default="{ row }">
             <el-tag v-if="row.decision !== '保留' && row.wearState !== '完好'" type="warning" size="small">待修配</el-tag>
             <span v-else>—</span>
           </template>
         </el-table-column>
+        <el-table-column label="操作" width="80" fixed="right">
+          <template #default="{ row }">
+            <el-button size="small" text type="primary" @click="openEdit(row)">编辑</el-button>
+          </template>
+        </el-table-column>
       </el-table>
-      <el-empty v-if="group.rows.length === 0" description="该状态暂无零件" :image-size="60" />
+      <el-empty v-if="group.rows.length === 0" description="该分组暂无零件" :image-size="60" />
     </el-card>
 
-    <el-dialog v-model="dialogVisible" title="登记零件" width="560px">
+    <el-dialog v-model="dialogVisible" :title="editingId ? '编辑零件（补录规格）' : '登记零件'" width="560px">
       <el-alert v-if="error" :title="error" type="error" :closable="false" style="margin-bottom: 10px" />
       <el-form :model="form" label-width="110px">
         <el-form-item label="所属钟表">
@@ -192,8 +323,12 @@ onMounted(async () => {
         <el-form-item label="来源批号">
           <el-input v-model="form.sourceLot" placeholder="如 MS-2024-07" />
         </el-form-item>
-        <el-form-item label="关键尺寸 mm">
-          <el-input-number v-model="form.dimension" :min="0" :max="200" :step="0.1" :precision="2" />
+        <el-form-item label="标准尺寸 mm" required>
+          <el-input-number v-model="form.stdDimension" :min="0" :max="200" :step="0.01" :precision="3" />
+        </el-form-item>
+        <el-form-item label="允许误差 mm" required>
+          <el-input-number v-model="form.tolerance" :min="0" :max="10" :step="0.01" :precision="3" />
+          <span class="hint">± 公差，实测偏差超过即判超差</span>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -226,5 +361,29 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.muted {
+  color: #7b8592;
+  font-size: 13px;
+  font-weight: 400;
+}
+.measure-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dev {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #7b8592;
+}
+.dev.out {
+  color: #d93025;
+  font-weight: 600;
+}
+.hint {
+  margin-left: 10px;
+  color: #7b8592;
+  font-size: 13px;
 }
 </style>

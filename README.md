@@ -63,7 +63,7 @@ sologsb-1120/
         ├── components/common/{StepSequence,RateChart,ClockCard,StateBadge}.vue
         ├── hooks/{useClockSearch,useRepairProgress}.ts
         ├── pages/{ClockList,ClockDetail,StepForm,PartList,TestView}.vue
-        └── utils/{db,timeCalc,id}.ts
+        └── utils/{db,timeCalc,id,assemblyGate}.ts
 ```
 
 ## 页面与路由
@@ -73,23 +73,27 @@ sologsb-1120/
 | `/clocks` | 钟表台账：按种类/机芯/品相/年代区间筛选，按修复状态分栏 | Clock |
 | `/clocks/:id` | 钟表详情：左侧机芯信息，右侧工序流与走时测试记录，可切零件清单 | Clock、RepairStep、TimekeepingTest、MovementPart |
 | `/steps/new` | 新建维修工序：选步骤类型后动态出清洗液/油脂/力矩字段，顺序号冲突即报错 | RepairStep、MovementPart |
-| `/parts` | 零件与配换清单：按磨损状态分组，标出待修配条目与来源批号 | MovementPart |
+| `/parts` | 零件与配换清单：登记标准尺寸与允许误差，录入实测自动判定，按待测/合格/超差分组 | MovementPart |
 | `/tests/:clockId` | 走时测试录入与多方位均值计算，生成走时单文本 | TimekeepingTest |
 
 `/` 重定向到 `/clocks`，未匹配路由同样兜底到 `/clocks`。
 
 ## 数据存储说明
 
-- 数据库名 `gbclockrepair`，当前结构版本 **v2**（`localStorage['gbclockrepair:db-version']` 记录）。
+- 数据库名 `gbclockrepair`，当前结构版本 **v3**（`localStorage['gbclockrepair:db-version']` 记录）。
 - 四张表：`clocks`（钟表）、`parts`（机芯零件）、`steps`（维修工序）、`tests`（走时测试）。
 - v1 → v2 迁移：补齐老记录的 `state`、`partIds`、`torque`、`positions` 字段并新增索引。
+- v2 → v3 迁移：零件由单一 `dimension` 拆为 `stdDimension`（标准尺寸）、`tolerance`（允许误差）、`measuredDimension`（实测尺寸）；老零件保留原值作为标准尺寸，实测留空，自动进入待补录（待测组）。
 - 容器无状态、不挂载命名卷；清空站点数据即回到初始示范数据。
-- 首次打开灌入 2 台示范钟表、3 项零件、3 道工序与 1 次走时测试。
+- 首次打开灌入 2 台示范钟表、3 项零件、4 道工序与 1 次走时测试。
 
 ## 功能要点
 
 - **顺序号不跳号**：新建工序时若顺序号大于「当前最大顺序号 + 1」直接报错并给出建议值；`<StepSequence>` 对缺口行标红。
 - **工序排序**：支持「上移 / 下移」按钮与原生拖拽交换顺序，交换的是 `seq`。
 - **工序完成 / 回退**：完成后写 `finishedAt`，回退后计入待办与回退计数。
+- **零件实测判定**：登记零件同时记标准尺寸与允许误差（±mm）；来件后在清单行内录入实测尺寸，按 `|实测 − 标准| ≤ 允许误差` 自动判为合格或超差，并显示偏差与超出量；清空实测值即回到待测。
+- **装配卡控**：装配步骤关联的修配、换新件未实测或超差时无法完成（按钮禁用 + store 层拦截），工序表「装配卡控」列与详情页进度条下方直接指出是哪只零件、偏差多少；未关联装配件的工序照常处理。
+- **零件分组清单**：零件按待测（含老数据待补录）/ 合格 / 超差分组展示，支持编辑补录规格与重录实测。
 - **双轴走时图**：`<RateChart>` 左轴日差 s/d、右轴摆幅 °，标注四方位读数与均值。
 - **走时单导出**：按方位均值生成文本，可复制或下载 txt。

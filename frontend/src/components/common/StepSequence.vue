@@ -2,12 +2,15 @@
 import { computed, ref } from 'vue';
 import type { RepairStep } from '../../types/step';
 import { findSeqGaps } from '../../utils/id';
+import { blockerLabel, type GateResult } from '../../utils/assemblyGate';
 import StateBadge from './StateBadge.vue';
 
 const props = defineProps<{
   items: RepairStep[];
   /** 是否展示上下移动/拖拽排序 */
   sortable?: boolean;
+  /** 装配卡控：返回该步骤的零件实测校验结果，未提供则不展示卡控列 */
+  gate?: (step: RepairStep) => GateResult;
 }>();
 
 const emit = defineEmits<{
@@ -21,6 +24,14 @@ const dragId = ref<string>('');
 
 const gaps = computed(() => findSeqGaps(props.items.map((it) => it.seq)));
 const conflict = computed(() => gaps.value.length > 0);
+
+function gateOf(row: RepairStep): GateResult {
+  return props.gate ? props.gate(row) : { checked: false, blockers: [] };
+}
+
+function blocked(row: RepairStep): boolean {
+  return gateOf(row).blockers.length > 0;
+}
 
 function onDragStart(id: string) {
   dragId.value = id;
@@ -68,15 +79,47 @@ function onDrop(toId: string) {
       <el-table-column label="异常说明" min-width="160">
         <template #default="{ row }">{{ row.troubleNote || '—' }}</template>
       </el-table-column>
+      <el-table-column v-if="gate" label="装配卡控" min-width="190">
+        <template #default="{ row }">
+          <template v-if="gateOf(row).checked">
+            <template v-if="gateOf(row).blockers.length">
+              <el-tag
+                v-for="b in gateOf(row).blockers"
+                :key="b.part.id"
+                :type="b.state === 'pending' ? 'warning' : 'danger'"
+                size="small"
+                class="blocker-tag"
+                >{{ blockerLabel(b) }}</el-tag
+              >
+            </template>
+            <el-tag v-else type="success" size="small" effect="plain">零件齐套</el-tag>
+          </template>
+          <span v-else>—</span>
+        </template>
+      </el-table-column>
       <el-table-column label="责任人" width="100">
         <template #default="{ row }">{{ row.operator }}</template>
       </el-table-column>
       <el-table-column label="操作" width="250">
         <template #default="{ row, $index }">
-          <el-button v-if="row.state !== 'done'" size="small" type="primary" @click="emit('finish', row.id)">
-            完成
-          </el-button>
-          <el-button v-else size="small" type="warning" @click="emit('rollback', row.id)">回退</el-button>
+          <el-tooltip
+            :disabled="!blocked(row)"
+            content="存在未实测/超差的装配零件，无法完成"
+            placement="top"
+          >
+            <span>
+              <el-button
+                v-if="row.state !== 'done'"
+                size="small"
+                type="primary"
+                :disabled="blocked(row)"
+                @click="emit('finish', row.id)"
+              >
+                完成
+              </el-button>
+              <el-button v-else size="small" type="warning" @click="emit('rollback', row.id)">回退</el-button>
+            </span>
+          </el-tooltip>
           <template v-if="sortable">
             <el-button size="small" :disabled="$index === 0" @click="emit('move', { id: row.id, direction: 'up' })">
               上移
@@ -109,6 +152,9 @@ function onDrop(toId: string) {
 .gap {
   color: #d93025;
   font-weight: 700;
+}
+.blocker-tag {
+  margin: 2px 6px 2px 0;
 }
 .drag-handle {
   margin-left: 8px;

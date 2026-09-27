@@ -11,6 +11,9 @@ import RateChart from '../components/common/RateChart.vue';
 import StateBadge from '../components/common/StateBadge.vue';
 import { CONDITION_GRADES, type ConditionGrade } from '../types/clock';
 import { judgeTest } from '../types/test';
+import { deviation, fmtMm, fmtSignedMm, measureState } from '../types/part';
+import { assemblyGate, formatBlockers, type GateResult } from '../utils/assemblyGate';
+import type { RepairStep } from '../types/step';
 
 const route = useRoute();
 const router = useRouter();
@@ -25,9 +28,21 @@ const parts = computed(() => partStore.byClock(clockId.value));
 const tests = computed(() => stepStore.testsByClock(clockId.value));
 const activeTab = ref('steps');
 
+/** 装配卡控：未实测/超差的修配、换新件会挡住装配步骤完成 */
+function gate(step: RepairStep): GateResult {
+  return assemblyGate(step, partStore.items);
+}
+
+/** 当前卡点步骤的装配受阻说明（哪只零件、差多少） */
+const currentBlockers = computed(() => (current.value ? gate(current.value).blockers : []));
+
 async function finish(id: string) {
-  await stepStore.finish(id);
-  ElMessage.success('步骤已完成');
+  try {
+    await stepStore.finish(id);
+    ElMessage.success('步骤已完成');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '无法完成该步骤');
+  }
 }
 async function rollback(id: string) {
   await stepStore.rollback(id);
@@ -110,10 +125,19 @@ onMounted(async () => {
             </div>
           </template>
           <el-progress :percentage="percent" :stroke-width="12" />
+          <el-alert
+            v-if="currentBlockers.length"
+            type="error"
+            :closable="false"
+            show-icon
+            style="margin-top: 10px"
+            :title="`装配受阻，进度停在完成前：${formatBlockers(currentBlockers)}`"
+          />
           <el-tabs v-model="activeTab" style="margin-top: 12px">
             <el-tab-pane label="工序顺序" name="steps">
               <StepSequence
                 :items="steps"
+                :gate="gate"
                 sortable
                 @finish="finish"
                 @rollback="rollback"
@@ -123,12 +147,33 @@ onMounted(async () => {
             </el-tab-pane>
             <el-tab-pane :label="`零件清单（${parts.length}）`" name="parts">
               <el-table :data="parts" size="small" border>
-                <el-table-column prop="name" label="零件" width="110" />
-                <el-table-column prop="position" label="装配位置" min-width="150" />
-                <el-table-column prop="wearState" label="磨损" width="90" />
-                <el-table-column prop="decision" label="处理" width="90" />
-                <el-table-column prop="sourceLot" label="来源批号" width="120" />
-                <el-table-column prop="dimension" label="尺寸 mm" width="100" />
+                <el-table-column prop="name" label="零件" width="100" />
+                <el-table-column prop="position" label="装配位置" min-width="130" />
+                <el-table-column prop="wearState" label="磨损" width="80" />
+                <el-table-column prop="decision" label="处理" width="80" />
+                <el-table-column prop="sourceLot" label="来源批号" width="110" />
+                <el-table-column label="标准 mm" width="90">
+                  <template #default="{ row }">{{ fmtMm(row.stdDimension) }}</template>
+                </el-table-column>
+                <el-table-column label="公差 mm" width="90">
+                  <template #default="{ row }">±{{ fmtMm(row.tolerance) }}</template>
+                </el-table-column>
+                <el-table-column label="实测 mm" width="90">
+                  <template #default="{ row }">{{ fmtMm(row.measuredDimension) }}</template>
+                </el-table-column>
+                <el-table-column label="判定" min-width="150">
+                  <template #default="{ row }">
+                    <el-tag v-if="measureState(row) === 'pending'" type="warning" size="small">待测</el-tag>
+                    <template v-else-if="measureState(row) === 'ok'">
+                      <el-tag type="success" size="small">合格</el-tag>
+                      <span class="muted"> 偏差 {{ fmtSignedMm(deviation(row)) }}mm</span>
+                    </template>
+                    <template v-else>
+                      <el-tag type="danger" size="small">超差</el-tag>
+                      <span class="danger-text"> 偏差 {{ fmtSignedMm(deviation(row)) }}mm</span>
+                    </template>
+                  </template>
+                </el-table-column>
               </el-table>
               <el-empty v-if="parts.length === 0" description="暂无零件登记" :image-size="60" />
             </el-tab-pane>
@@ -186,6 +231,11 @@ onMounted(async () => {
 .muted {
   color: #7b8592;
   font-size: 13px;
+}
+.danger-text {
+  color: #d93025;
+  font-size: 13px;
+  font-weight: 600;
 }
 .grade-row {
   margin-top: 12px;
