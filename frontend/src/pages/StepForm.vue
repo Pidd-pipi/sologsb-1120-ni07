@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, h, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
 import { usePartStore } from '../stores/partStore';
 import { useStepStore } from '../stores/stepStore';
 import { useRepairProgress } from '../hooks/useRepairProgress';
+import { useMeasureBlockers } from '../hooks/useMeasureBlockers';
 import StepSequence from '../components/common/StepSequence.vue';
 import { STEP_FIELD_MAP, STEP_TYPES, type RepairStepDraft, type StepType } from '../types/step';
+import { blockerText, measureStatusOf, type MeasureBlocker } from '../types/part';
 
 const route = useRoute();
 const router = useRouter();
@@ -17,6 +19,7 @@ const stepStore = useStepStore();
 
 const clockId = ref(String(route.query.clockId ?? ''));
 const { steps, total, percent, current, gaps } = useRepairProgress(clockId);
+const { blockersByStep } = useMeasureBlockers(clockId);
 const parts = computed(() => partStore.byClock(clockId.value));
 const nextSeq = computed(() => (steps.value.length === 0 ? 1 : Math.max(...steps.value.map((s) => s.seq)) + 1));
 
@@ -83,7 +86,21 @@ async function submit() {
 }
 
 async function finish(id: string) {
-  await stepStore.finish(id);
+  const res = await stepStore.finish(id);
+  if (!res.ok) {
+    void ElMessageBox({
+      title: '装配核查未通过，步骤无法完成',
+      message: h('div', [
+        h('p', { style: 'margin:0 0 6px' }, '以下关联零件未实测或超差：'),
+        ...res.blockers.map((b: MeasureBlocker) =>
+          h('p', { style: 'margin:4px 0;color:#b3261e' }, `· ${blockerText(b)}`),
+        ),
+      ]),
+      type: 'warning',
+      confirmButtonText: '知道了',
+    });
+    return;
+  }
   ElMessage.success('步骤已完成');
 }
 async function rollback(id: string) {
@@ -161,10 +178,13 @@ onMounted(async () => {
               <el-option
                 v-for="p in parts"
                 :key="p.id"
-                :label="`${p.name} · ${p.position}`"
+                :label="`${p.name} · ${p.position}（${p.decision} · ${measureStatusOf(p)}）`"
                 :value="p.id"
               />
             </el-select>
+            <div v-if="form.stepType === '装配'" class="hint" style="margin-left: 0">
+              装配步骤完成前，关联的修配/换新件必须实测合格，否则进度停在完成前
+            </div>
           </el-form-item>
           <el-form-item label="异常说明">
             <el-input v-model="form.troubleNote" type="textarea" :rows="3" />
@@ -188,7 +208,7 @@ onMounted(async () => {
             <span v-else class="muted">全部完成</span>
           </div>
         </template>
-        <StepSequence :items="steps" @finish="finish" @rollback="rollback" />
+        <StepSequence :items="steps" :blockers="blockersByStep" @finish="finish" @rollback="rollback" />
       </el-card>
     </div>
   </div>

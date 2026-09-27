@@ -6,7 +6,7 @@ import type { TimekeepingTest } from '../types/test';
 import { newId } from './id';
 
 export const DB_NAME = 'gbclockrepair';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbclockrepair:db-version';
 
 class ClockRepairDB extends Dexie {
@@ -46,6 +46,26 @@ class ClockRepairDB extends Dexie {
           .toCollection()
           .modify((row: any) => {
             if (row.positions === undefined) row.positions = [];
+          });
+      });
+    // v3：零件引入标准尺寸/允差/实测。老零件的「关键尺寸」原值保留为标准尺寸，
+    // 允差与实测留空，测量状态自动落入「待补录」。
+    this.version(3)
+      .stores({
+        clocks: 'id, clockNo, kind, caliber, conditionGrade, createdAt',
+        parts: 'id, clockId, name, wearState, decision, sourceLot',
+        steps: 'id, clockId, seq, stepType, state, startedAt',
+        tests: 'id, clockId, testedAt, conclusion',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('parts')
+          .toCollection()
+          .modify((row: any) => {
+            if (row.specDimension === undefined && row.dimension !== undefined) {
+              row.specDimension = row.dimension;
+            }
+            delete row.dimension;
           });
       });
   }
@@ -133,7 +153,11 @@ export async function ensureSeedData(): Promise<void> {
       wearState: '断裂',
       decision: '换新',
       sourceLot: 'MS-2024-07',
-      dimension: 0.35,
+      specDimension: 0.35,
+      tolerance: 0.02,
+      // 来件实测 0.380，偏差 +0.030 超允差 → 超差，装配步骤被它卡住
+      measuredDimension: 0.38,
+      measuredAt: now - 4 * day,
     },
     {
       id: newId('prt'),
@@ -144,7 +168,10 @@ export async function ensureSeedData(): Promise<void> {
       wearState: '磨损',
       decision: '修配',
       sourceLot: 'JWL-18',
-      dimension: 1.2,
+      specDimension: 1.2,
+      tolerance: 0.02,
+      measuredDimension: 1.19,
+      measuredAt: now - 5 * day,
     },
     {
       id: newId('prt'),
@@ -155,7 +182,8 @@ export async function ensureSeedData(): Promise<void> {
       wearState: '完好',
       decision: '保留',
       sourceLot: '',
-      dimension: 14.5,
+      specDimension: 14.5,
+      tolerance: 0.05,
     },
   ];
 
@@ -208,6 +236,22 @@ export async function ensureSeedData(): Promise<void> {
       troubleNote: '',
       operator: '祁仲言',
       startedAt: now - 3 * day,
+      state: 'pending',
+    },
+    {
+      id: newId('stp'),
+      clockId: clockA,
+      stepType: '装配',
+      seq: 4,
+      partIds: [parts[0].id, parts[1].id],
+      cleanSolvent: '',
+      cleanMethod: '',
+      oilType: 'Moebius 9415',
+      oilPoints: '擒纵叉瓦工作面',
+      torque: 0.6,
+      troubleNote: '新发条实测 0.380mm，超允差 0.010mm，待退换',
+      operator: '祁仲言',
+      startedAt: now - 1 * day,
       state: 'pending',
     },
   ];

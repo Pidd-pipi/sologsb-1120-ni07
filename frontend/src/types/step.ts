@@ -1,3 +1,11 @@
+import {
+  measureDeviation,
+  measureStatusOf,
+  overToleranceBy,
+  type MeasureBlocker,
+  type MovementPart,
+} from './part';
+
 /** 维修步骤类型 */
 export type StepType = '拆解' | '清洗' | '润滑' | '装配' | '调试' | '走时测试';
 
@@ -46,3 +54,25 @@ export interface RepairStep {
 }
 
 export type RepairStepDraft = Omit<RepairStep, 'id'>;
+
+/**
+ * 装配核查：装配步骤关联的修配/换新件中，仍未实测（待补录/待测）或超差的零件。
+ * 返回空数组表示可正常完成；未关联装配件的工序一律照常处理。
+ */
+export function assemblyBlockers(step: RepairStep, parts: MovementPart[]): MeasureBlocker[] {
+  if (step.stepType !== '装配' || step.partIds.length === 0) return [];
+  const blockers: MeasureBlocker[] = [];
+  for (const pid of step.partIds) {
+    const part = parts.find((p) => p.id === pid);
+    if (!part || part.decision === '保留') continue;
+    const status = measureStatusOf(part);
+    if (status === '合格') continue;
+    blockers.push({
+      part,
+      status,
+      deviation: measureDeviation(part),
+      overBy: overToleranceBy(part),
+    });
+  }
+  return blockers;
+}

@@ -30,6 +30,19 @@ export const usePartStore = defineStore('part', {
       await db.parts.update(id, plain);
       this.items = this.items.map((it) => (it.id === id ? { ...it, ...plain } : it));
     },
+    /** 撤销实测录入，零件回到待测 */
+    async clearMeasurement(id: string) {
+      await db.parts
+        .where('id')
+        .equals(id)
+        .modify((row: MovementPart) => {
+          delete row.measuredDimension;
+          delete row.measuredAt;
+        });
+      this.items = this.items.map((it) =>
+        it.id === id ? { ...it, measuredDimension: undefined, measuredAt: undefined } : it,
+      );
+    },
     async remove(id: string) {
       await db.parts.delete(id);
       this.items = this.items.filter((it) => it.id !== id);

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import type { RepairStep } from '../../types/step';
+import { blockerText, type MeasureBlocker } from '../../types/part';
 import { findSeqGaps } from '../../utils/id';
 import StateBadge from './StateBadge.vue';
 
@@ -8,6 +9,8 @@ const props = defineProps<{
   items: RepairStep[];
   /** 是否展示上下移动/拖拽排序 */
   sortable?: boolean;
+  /** 各步骤的装配核查阻断项（未实测/超差零件） */
+  blockers?: Map<string, MeasureBlocker[]>;
 }>();
 
 const emit = defineEmits<{
@@ -21,6 +24,10 @@ const dragId = ref<string>('');
 
 const gaps = computed(() => findSeqGaps(props.items.map((it) => it.seq)));
 const conflict = computed(() => gaps.value.length > 0);
+
+function blockersOf(id: string): MeasureBlocker[] {
+  return props.blockers?.get(id) ?? [];
+}
 
 function onDragStart(id: string) {
   dragId.value = id;
@@ -65,6 +72,17 @@ function onDrop(toId: string) {
           <div v-if="!row.cleanSolvent && !row.oilType && !row.torque">—</div>
         </template>
       </el-table-column>
+      <el-table-column label="装配核查" min-width="240">
+        <template #default="{ row }">
+          <template v-if="blockersOf(row.id).length">
+            <div v-for="b in blockersOf(row.id)" :key="b.part.id" class="blocker-line">
+              <el-tag size="small" :type="b.status === '超差' ? 'danger' : 'warning'">{{ b.status }}</el-tag>
+              <span>{{ blockerText(b) }}</span>
+            </div>
+          </template>
+          <span v-else>—</span>
+        </template>
+      </el-table-column>
       <el-table-column label="异常说明" min-width="160">
         <template #default="{ row }">{{ row.troubleNote || '—' }}</template>
       </el-table-column>
@@ -73,7 +91,14 @@ function onDrop(toId: string) {
       </el-table-column>
       <el-table-column label="操作" width="250">
         <template #default="{ row, $index }">
-          <el-button v-if="row.state !== 'done'" size="small" type="primary" @click="emit('finish', row.id)">
+          <el-button
+            v-if="row.state !== 'done'"
+            size="small"
+            type="primary"
+            :disabled="blockersOf(row.id).length > 0"
+            :title="blockersOf(row.id).length > 0 ? '装配核查未通过：先实测/处理关联零件' : ''"
+            @click="emit('finish', row.id)"
+          >
             完成
           </el-button>
           <el-button v-else size="small" type="warning" @click="emit('rollback', row.id)">回退</el-button>
@@ -109,6 +134,14 @@ function onDrop(toId: string) {
 .gap {
   color: #d93025;
   font-weight: 700;
+}
+.blocker-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.6;
+  color: #b3261e;
+  font-size: 12px;
 }
 .drag-handle {
   margin-left: 8px;

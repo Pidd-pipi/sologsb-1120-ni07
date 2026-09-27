@@ -1,16 +1,24 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, h, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
 import { usePartStore } from '../stores/partStore';
 import { useStepStore } from '../stores/stepStore';
 import { useRepairProgress } from '../hooks/useRepairProgress';
+import { useMeasureBlockers } from '../hooks/useMeasureBlockers';
 import StepSequence from '../components/common/StepSequence.vue';
 import RateChart from '../components/common/RateChart.vue';
 import StateBadge from '../components/common/StateBadge.vue';
 import { CONDITION_GRADES, type ConditionGrade } from '../types/clock';
 import { judgeTest } from '../types/test';
+import {
+  blockerText,
+  formatDim,
+  measureStatusOf,
+  measureTone,
+  type MeasureBlocker,
+} from '../types/part';
 
 const route = useRoute();
 const router = useRouter();
@@ -21,12 +29,32 @@ const stepStore = useStepStore();
 const clockId = computed(() => String(route.params.id ?? ''));
 const clock = computed(() => clockStore.byId(clockId.value));
 const { progress, steps, done, total, percent, current, gaps } = useRepairProgress(clockId);
+const { blockersByStep } = useMeasureBlockers(clockId);
 const parts = computed(() => partStore.byClock(clockId.value));
 const tests = computed(() => stepStore.testsByClock(clockId.value));
 const activeTab = ref('steps');
 
+/** 当前卡点步骤的装配核查阻断项 */
+const currentBlockers = computed(() => (current.value ? blockersByStep.value.get(current.value.id) ?? [] : []));
+
+function showBlockers(blockers: MeasureBlocker[]) {
+  void ElMessageBox({
+    title: '装配核查未通过，步骤无法完成',
+    message: h('div', [
+      h('p', { style: 'margin:0 0 6px' }, '以下关联零件未实测或超差：'),
+      ...blockers.map((b) => h('p', { style: 'margin:4px 0;color:#b3261e' }, `· ${blockerText(b)}`)),
+    ]),
+    type: 'warning',
+    confirmButtonText: '知道了',
+  });
+}
+
 async function finish(id: string) {
-  await stepStore.finish(id);
+  const res = await stepStore.finish(id);
+  if (!res.ok) {
+    showBlockers(res.blockers);
+    return;
+  }
   ElMessage.success('步骤已完成');
 }
 async function rollback(id: string) {
@@ -107,13 +135,25 @@ onMounted(async () => {
                 当前卡点：#{{ current.seq }} {{ current.stepType }}（{{ current.operator }}）
               </span>
               <span v-else class="muted">全部步骤已完成</span>
+              <el-tag v-if="currentBlockers.length" type="danger" size="small">装配核查未通过</el-tag>
             </div>
           </template>
           <el-progress :percentage="percent" :stroke-width="12" />
+          <el-alert
+            v-if="currentBlockers.length"
+            type="error"
+            :closable="false"
+            show-icon
+            style="margin-top: 10px"
+            title="进度停在完成前：以下零件未实测或超差"
+          >
+            <div v-for="b in currentBlockers" :key="b.part.id">· {{ blockerText(b) }}</div>
+          </el-alert>
           <el-tabs v-model="activeTab" style="margin-top: 12px">
             <el-tab-pane label="工序顺序" name="steps">
               <StepSequence
                 :items="steps"
+                :blockers="blockersByStep"
                 sortable
                 @finish="finish"
                 @rollback="rollback"
@@ -123,12 +163,25 @@ onMounted(async () => {
             </el-tab-pane>
             <el-tab-pane :label="`零件清单（${parts.length}）`" name="parts">
               <el-table :data="parts" size="small" border>
-                <el-table-column prop="name" label="零件" width="110" />
-                <el-table-column prop="position" label="装配位置" min-width="150" />
-                <el-table-column prop="wearState" label="磨损" width="90" />
-                <el-table-column prop="decision" label="处理" width="90" />
-                <el-table-column prop="sourceLot" label="来源批号" width="120" />
-                <el-table-column prop="dimension" label="尺寸 mm" width="100" />
+                <el-table-column prop="name" label="零件" width="100" />
+                <el-table-column prop="position" label="装配位置" min-width="130" />
+                <el-table-column prop="wearState" label="磨损" width="80" />
+                <el-table-column prop="decision" label="处理" width="80" />
+                <el-table-column prop="sourceLot" label="来源批号" width="110" />
+                <el-table-column label="标准 mm" width="95">
+                  <template #default="{ row }">{{ formatDim(row.specDimension) }}</template>
+                </el-table-column>
+                <el-table-column label="允差 mm" width="85">
+                  <template #default="{ row }">{{ formatDim(row.tolerance) }}</template>
+                </el-table-column>
+                <el-table-column label="实测 mm" width="95">
+                  <template #default="{ row }">{{ formatDim(row.measuredDimension) }}</template>
+                </el-table-column>
+                <el-table-column label="判定" width="90">
+                  <template #default="{ row }">
+                    <StateBadge :label="measureStatusOf(row)" :tone="measureTone(measureStatusOf(row))" />
+                  </template>
+                </el-table-column>
               </el-table>
               <el-empty v-if="parts.length === 0" description="暂无零件登记" :image-size="60" />
             </el-tab-pane>
